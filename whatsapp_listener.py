@@ -80,15 +80,23 @@ class WhatsAppBot:
             if self.should_ignore_chat():
                 return False
                 
-            # Use the existing deduplication logic to check if a new message arrived
-            # while we were scanning other chats or idling
-            if self.check_active_chat_for_new_messages(contact_name):
+            # Temporarily clear last_active_message so the passive check always
+            # compares against what's currently on screen — not a stale old message.
+            # This is what allows the bot to detect a NEW message from the same person
+            # even after the 30-second active window expired without a badge appearing.
+            saved_last = getattr(self, 'last_active_message', None)
+            self.last_active_message = None
+            
+            found_new = self.check_active_chat_for_new_messages(contact_name)
+            
+            if found_new:
                 logger.info(f"Picked up a new message in the passively open chat with '{contact_name}'.")
-                
-                # If we just replied to them, let's re-enter the active monitor loop
-                # to catch immediate follow-ups
+                # Re-enter active monitoring to catch follow-ups
                 self.process_chat(None, True)
                 return True
+            else:
+                # No new message — restore the old value so we don't re-reply anything
+                self.last_active_message = saved_last
                 
         except Exception as e:
             logger.debug(f"Passive open chat check failed: {e}")
@@ -287,6 +295,11 @@ class WhatsAppBot:
                 except StaleElementReferenceException:
                     pass
             
+            # CRITICAL FIX: Reset the last active message tracker when the monitoring
+            # window expires. This ensures that if the same person sends a NEW message
+            # AFTER the 30-second window, the passive checker won't mistake it for
+            # an already-processed duplicate and skip it silently.
+            self.last_active_message = None
             logger.info(f"Finished active monitoring for '{contact_name}'. Returning to main scan.")
             
         except StaleElementReferenceException:
