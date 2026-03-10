@@ -277,8 +277,15 @@ class WhatsAppBot:
         """Checks the currently open chat for new messages and replies if found."""
         last_message_text = self.get_last_message_text()
         
+        # If no text could be extracted, the person may have sent an image, sticker,
+        # voice note, or video. We still want to reply to acknowledge it.
         if not last_message_text:
-            return False
+            # Check if there is at least one incoming message in the DOM
+            incoming_count = self.get_incoming_message_count()
+            if incoming_count == 0:
+                return False
+            # Use a placeholder so the AI knows to reply generically
+            last_message_text = "[sent a photo/sticker/voice note/video]"
             
         # We also need to keep track of the absolute last message processed during this active loop 
         # to prevent double-replying to the exact same message text if the DOM reloads.
