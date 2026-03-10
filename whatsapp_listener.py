@@ -153,12 +153,46 @@ class WhatsAppBot:
         Detects if the active chat is a group, channel, or community.
         Uses multiple independent detection methods for reliability.
         Returns True if the chat should be IGNORED (group/channel/community).
+        
+        IMPORTANT: WhatsApp Web has TWO <header> elements:
+        1. The sidebar/search bar header (inside #side)
+        2. The chat panel header (inside #main)
+        We MUST target the chat panel header specifically.
         """
         try:
-            header = self.driver.find_element(By.XPATH, '//header')
-            header_text = header.text.lower()
+            # Try multiple specific selectors for the chat-specific header
+            # Priority: look inside #main div to avoid getting the sidebar header
+            header = None
+            chat_header_selectors = [
+                '//div[@id="main"]//header',
+                '//div[contains(@class,"conversation-panel")]//header',
+                '//div[@data-testid="conversation-header"]',
+            ]
+            for selector in chat_header_selectors:
+                try:
+                    elements = self.driver.find_elements(By.XPATH, selector)
+                    if elements:
+                        header = elements[0]
+                        break
+                except Exception:
+                    pass
 
-            # METHOD 1: Look for group/community/channel SVG icon data attributes
+            if not header:
+                # Fallback: if there are multiple headers, the 2nd one is usually the chat header
+                all_headers = self.driver.find_elements(By.XPATH, '//header')
+                if len(all_headers) >= 2:
+                    header = all_headers[1]
+                elif all_headers:
+                    header = all_headers[0]
+                else:
+                    logger.warning("No header found at all, defaulting to SKIP for safety.")
+                    return True
+
+            # Log what we're actually reading so we can diagnose in Coolify logs
+            header_text = header.text.lower()
+            logger.info(f"Group check reading header: '{header_text[:120]}'")
+
+            # CHECK 1: SVG icon data-icon attribute
             icon_patterns = ['default-group', 'default-community', 'channel', 'group', 'community', 'newsletter']
             try:
                 svgs = header.find_elements(By.XPATH, './/*[local-name()="svg"]')
@@ -170,46 +204,50 @@ class WhatsAppBot:
             except Exception:
                 pass
 
-            # METHOD 2: Check subtitle for "X members" - the definitive group indicator
-            subtitle_xpaths = ['.//div[@title]', './/span[@dir="auto"]']
-            for xpath in subtitle_xpaths:
-                try:
-                    elements = header.find_elements(By.XPATH, xpath)
-                    for el in elements:
-                        text = (el.get_attribute("title") or el.text or "").lower()
-                        if 'member' in text:
-                            logger.info(f"Group detected via 'members' in subtitle: '{text}'. Skipping.")
-                            return True
-                        # Group subtitle lists participants starting with "You, "
-                        if text.startswith('you, '):
-                            logger.info(f"Group detected via participant list: '{text[:60]}'. Skipping.")
-                            return True
-                        if any(kw in text for kw in ['channel', 'community', 'newsletter', 'broadcast']):
-                            logger.info(f"Group/Channel detected via keyword: '{text[:60]}'. Skipping.")
-                            return True
-                except Exception:
-                    pass
-
-            # METHOD 3: Full header text for definitive group-only phrases
-            if any(kw in header_text for kw in ['members', 'broadcast list', 'newsletter']):
-                logger.info(f"Group detected via header text keywords. Skipping.")
+            # CHECK 2: Header text contains definitive group-only keywords
+            if 'member' in header_text:
+                logger.info(f"Group detected: 'member' found in header text. Skipping.")
+                return True
+            if any(kw in header_text for kw in ['broadcast list', 'newsletter', 'community']):
+                logger.info(f"Group/Channel detected via keyword in header. Skipping.")
                 return True
 
-            # METHOD 4: Comma in the contact name span (group member list)
+            # CHECK 3: Subtitle elements — check for "You, " (member list) or "members"
             try:
-                name_spans = header.find_elements(By.XPATH, './/span[@dir="auto"]')
-                if name_spans and ',' in name_spans[0].text:
-                    logger.info(f"Group detected via comma in name: '{name_spans[0].text[:60]}'. Skipping.")
-                    return True
+                all_spans = header.find_elements(By.XPATH, './/span[@dir="auto"] | .//div[@title]')
+                for el in all_spans:
+                    text = (el.get_attribute("title") or el.text or "").lower()
+                    if not text:
+                        continue
+                    if 'member' in text:
+                        logger.info(f"Group detected via 'member' in span: '{text[:60]}'. Skipping.")
+                        return True
+                    if text.startswith('you, '):
+                        logger.info(f"Group detected via participant list starting with 'You,': '{text[:60]}'. Skipping.")
+                        return True
+                    if any(kw in text for kw in ['channel', 'community', 'newsletter', 'broadcast']):
+                        logger.info(f"Group/Channel detected via keyword in element: '{text[:60]}'. Skipping.")
+                        return True
             except Exception:
                 pass
 
+            # CHECK 4: Comma in the contact name span
+            try:
+                name_spans = header.find_elements(By.XPATH, './/span[@dir="auto"]')
+                for span in name_spans:
+                    if ',' in span.text:
+                        logger.info(f"Group detected via comma-separated list in span: '{span.text[:60]}'. Skipping.")
+                        return True
+            except Exception:
+                pass
+
+            logger.info("Group check passed — treating as 1-on-1 chat.")
             return False
 
         except Exception as e:
-            # Default to True (skip) on error to prevent accidental group replies
-            logger.warning(f"Group check failed, defaulting to SKIP for safety. Error: {e}")
+            logger.warning(f"Group check failed with exception, defaulting to SKIP for safety. Error: {e}")
             return True
+
 
 
     def get_last_message_text(self):
