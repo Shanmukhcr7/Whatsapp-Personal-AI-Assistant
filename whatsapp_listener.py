@@ -19,8 +19,11 @@ class WhatsAppBot:
     def __init__(self):
         """Initializes the bot and the Chrome driver."""
         self.driver = self._init_driver()
-        # Set to track already replied messages
+        # Set to track already replied messages (text-based, for within a session)
         self.replied_messages = set()
+        # Dict to track the message count per contact for the open-chat passive monitor.
+        # Key: contact_name, Value: number of incoming messages when we last replied.
+        self.last_message_count = {}
         
     def _init_driver(self):
         """Sets up Chrome WebDriver with user profile saved."""
@@ -57,10 +60,20 @@ class WhatsAppBot:
             self.driver.quit()
             raise
 
+    def get_incoming_message_count(self):
+        """Returns the current number of incoming (received) messages visible in the open chat."""
+        try:
+            incoming = self.driver.find_elements(By.XPATH, '//div[contains(@class, "message-in")]')
+            return len(incoming)
+        except Exception:
+            return 0
+
     def check_current_open_chat_passive(self):
         """
         Passively checks the currently open chat window (if any) for new messages 
-        even if there's no unread badge in the list.
+        using a MESSAGE COUNT approach — immune to the text-dedup false-negative bug.
+        If the number of incoming messages in the open chat has INCREASED since we
+        last replied, there must be a new message we haven't handled yet.
         """
         try:
             # Check if there's an active chat header visible
@@ -75,31 +88,27 @@ class WhatsAppBot:
                 try:
                     contact_name = header_element.find_element(By.XPATH, './/span[contains(@class, "ggj6brxn")]').text
                 except:
-                    return False # Unverifiable chat
+                    return False
+
+            if not contact_name or not contact_name.strip():
+                return False
                     
             if self.should_ignore_chat():
                 return False
-                
-            # Temporarily clear last_active_message so the passive check always
-            # compares against what's currently on screen — not a stale old message.
-            # This is what allows the bot to detect a NEW message from the same person
-            # even after the 30-second active window expired without a badge appearing.
-            saved_last = getattr(self, 'last_active_message', None)
-            self.last_active_message = None
-            
-            found_new = self.check_active_chat_for_new_messages(contact_name)
-            
-            if found_new:
-                logger.info(f"Picked up a new message in the passively open chat with '{contact_name}'.")
-                # Re-enter active monitoring to catch follow-ups
-                self.process_chat(None, True)
+
+            # Count how many incoming messages are visible right now
+            current_count = self.get_incoming_message_count()
+            last_count = self.last_message_count.get(contact_name, 0)
+
+            if current_count > last_count:
+                # New message(s) have appeared since we last handled this chat!
+                logger.info(f"Passive check: {current_count - last_count} new message(s) in open chat with '{contact_name}' (was {last_count}, now {current_count}).")
+                # Re-enter the active monitor loop to process and reply
+                self.process_chat(None, already_open=True)
                 return True
-            else:
-                # No new message — restore the old value so we don't re-reply anything
-                self.last_active_message = saved_last
                 
         except Exception as e:
-            logger.debug(f"Passive open chat check failed: {e}")
+            logger.warning(f"Passive open chat check failed: {e}")
         return False
 
     def check_for_unread_messages(self):
@@ -222,14 +231,20 @@ class WhatsAppBot:
         # Simulate human delay before sending response
         random_delay()
         
-        # Ask Gemini for a reply
+        # Ask AI for a reply
         reply_text = generate_reply(last_message_text, contact_name=contact_name)
         
         # Type and send
         self.send_message(reply_text)
         
-        # Mark it as replied to avoid ghost replays
+        # Mark it as replied to avoid ghost replays within the same active session
         self.replied_messages.add(msg_id)
+        
+        # CRITICAL: Update the message count tracker so the passive checker knows
+        # the current message count has been handled. Any future increase means
+        # a brand new message arrived.
+        self.last_message_count[contact_name] = self.get_incoming_message_count()
+        
         logger.info(f"Successfully sent AI reply to '{contact_name}'.")
         return True
 
@@ -295,12 +310,10 @@ class WhatsAppBot:
                 except StaleElementReferenceException:
                     pass
             
-            # CRITICAL FIX: Reset the last active message tracker when the monitoring
-            # window expires. This ensures that if the same person sends a NEW message
-            # AFTER the 30-second window, the passive checker won't mistake it for
-            # an already-processed duplicate and skip it silently.
-            self.last_active_message = None
             logger.info(f"Finished active monitoring for '{contact_name}'. Returning to main scan.")
+            # Reset the text-based dedup so the passive count-checker
+            # remains the sole authority on new messages in open chats.
+            self.last_active_message = None
             
         except StaleElementReferenceException:
             logger.warning(f"DOM updated unexpectedly while processing chat. Will check again on next scan.")
