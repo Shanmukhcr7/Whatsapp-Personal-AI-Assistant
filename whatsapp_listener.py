@@ -1,0 +1,347 @@
+import time
+from selenium import webdriver
+from selenium.webdriver.chrome.service import Service as ChromeService
+from selenium.webdriver.chrome.options import Options
+from selenium.webdriver.common.by import By
+from selenium.webdriver.support.ui import WebDriverWait
+from selenium.webdriver.support import expected_conditions as EC
+from selenium.common.exceptions import TimeoutException, NoSuchElementException, StaleElementReferenceException
+from webdriver_manager.chrome import ChromeDriverManager
+from selenium.webdriver.common.keys import Keys
+
+from config import WEB_WHATSAPP_URL
+from ai_engine import generate_reply
+from utils import get_logger, random_delay
+
+logger = get_logger(__name__)
+
+class WhatsAppBot:
+    def __init__(self):
+        """Initializes the bot and the Chrome driver."""
+        self.driver = self._init_driver()
+        # Set to track already replied messages
+        self.replied_messages = set()
+        
+    def _init_driver(self):
+        """Sets up Chrome WebDriver with user profile saved."""
+        logger.info("Initializing Chrome WebDriver...")
+        chrome_options = Options()
+        import os
+        # Saving user data avoids scanning the QR code every single run
+        profile_path = os.path.abspath("./chrome_profile")
+        chrome_options.add_argument(f"--user-data-dir={profile_path}")
+        chrome_options.add_argument("--no-sandbox")
+        chrome_options.add_argument("--disable-dev-shm-usage")
+        chrome_options.add_argument("--disable-gpu")
+        chrome_options.add_argument("--remote-allow-origins=*")
+        
+        service = ChromeService(ChromeDriverManager().install())
+        driver = webdriver.Chrome(service=service, options=chrome_options)
+        return driver
+
+    def start(self):
+        """Opens WhatsApp Web and waits for QR login."""
+        logger.info(f"Navigating to {WEB_WHATSAPP_URL}")
+        self.driver.get(WEB_WHATSAPP_URL)
+        
+        logger.info("Waiting for WhatsApp to load (and for QR code scan if needed)...")
+        try:
+            # Wait for the main app UI to indicate successful login
+            # 'side' div is the main left sidebar of WhatsApp Web.
+            WebDriverWait(self.driver, 120).until(
+                EC.presence_of_element_located((By.XPATH, '//div[@id="side"]'))
+            )
+            logger.info("Successfully loaded WhatsApp Web.")
+        except TimeoutException:
+            logger.error("Timeout waiting for WhatsApp Web to load. Make sure you scanned the QR code.")
+            self.driver.quit()
+            raise
+
+    def check_current_open_chat_passive(self):
+        """
+        Passively checks the currently open chat window (if any) for new messages 
+        even if there's no unread badge in the list.
+        """
+        try:
+            # Check if there's an active chat header visible
+            header = self.driver.find_elements(By.XPATH, '//header')
+            if not header:
+                return False
+                
+            header_element = header[0]
+            try:
+                contact_name = header_element.find_element(By.XPATH, './/span[@dir="auto"]').text
+            except NoSuchElementException:
+                try:
+                    contact_name = header_element.find_element(By.XPATH, './/span[contains(@class, "ggj6brxn")]').text
+                except:
+                    return False # Unverifiable chat
+                    
+            if self.should_ignore_chat():
+                return False
+                
+            # Use the existing deduplication logic to check if a new message arrived
+            # while we were scanning other chats or idling
+            if self.check_active_chat_for_new_messages(contact_name):
+                logger.info(f"Picked up a new message in the passively open chat with '{contact_name}'.")
+                
+                # If we just replied to them, let's re-enter the active monitor loop
+                # to catch immediate follow-ups
+                self.process_chat(None, True)
+                return True
+                
+        except Exception as e:
+            logger.debug(f"Passive open chat check failed: {e}")
+        return False
+
+    def check_for_unread_messages(self):
+        """Checks the chat list for unread messages."""
+        try:
+            # 1. First, always check if the chat that is currently open on the screen
+            # has any new messages. (WhatsApp removes the badge if the chat is open).
+            if self.check_current_open_chat_passive():
+                return True
+                
+            # 2. WhatsApp unread badges usually have 'unread message' in the aria-label
+            unread_badges = self.driver.find_elements(
+                By.XPATH, 
+                '//span[@aria-label and contains(@aria-label, "unread message")]'
+            )
+            
+            if not unread_badges:
+                return False
+                
+            for badge in unread_badges:
+                # Find the parent wrapper to click on the chat
+                try:
+                    chat = badge.find_element(By.XPATH, './ancestor::div[@role="row"] | ./ancestor::div[@role="listitem"]')
+                except NoSuchElementException:
+                    # Fallback to clicking the badge or its immediate container
+                    logger.warning("Could not find role='row' or 'listitem'. Falling back to badge itself.")
+                    chat = badge
+                
+                self.process_chat(chat)
+                
+            return True
+            
+        except StaleElementReferenceException:
+            # List might update while we are checking, skip and check again later
+            return False
+        except Exception as e:
+            logger.error(f"Error checking for unread messages: {e}")
+            return False
+
+    def should_ignore_chat(self):
+        """
+        Detects if the active chat is a group, channel, or community.
+        Bot is designed to NOT reply in these chats.
+        """
+        try:
+            header = self.driver.find_element(By.XPATH, '//header')
+            
+            # 1. Look for specific icons
+            try:
+                header.find_element(By.XPATH, './/*[local-name()="svg" and (contains(@data-icon, "default-group") or contains(@data-icon, "default-community") or contains(@data-icon, "channel"))]')
+                return True
+            except NoSuchElementException:
+                pass
+                
+            # 2. Look for multiple participants (comma separated in title/subtitle) 
+            # or the words 'group', 'channel', 'community'
+            try:
+                subtitle = header.find_element(By.XPATH, './/div[@title]')
+                title_text = subtitle.get_attribute("title").lower()
+                ignore_keywords = ['group', 'channel', 'community']
+                if ',' in title_text or any(keyword in title_text for keyword in ignore_keywords):
+                    return True
+            except NoSuchElementException:
+                pass
+                
+            return False
+            
+        except Exception as e:
+            # If unsure, we assume it's NOT a group, but we log it
+            logger.warning(f"Could not conclusively verify if chat is a group/channel/community. Proceeding as 1-on-1. Error: {e}")
+            return False
+
+    def get_last_message_text(self):
+        """Helper to get the text of the last incoming message in the active chat."""
+        try:
+            incoming_messages = self.driver.find_elements(By.XPATH, '//div[contains(@class, "message-in")]')
+            if not incoming_messages:
+                return None
+                
+            last_message_element = incoming_messages[-1]
+            # Extract text using reliable span classes/directions used by WhatsApp Web
+            text_spans = last_message_element.find_elements(By.XPATH, './/span[@dir="ltr"] | .//span[contains(@class, "copyable-text")]')
+            
+            if not text_spans:
+                return None
+                
+            # Assemble text parts
+            return " ".join([span.text for span in text_spans if span.text.strip() != ""]).strip()
+            
+        except StaleElementReferenceException:
+            return None
+        except Exception as e:
+            logger.debug(f"Failed to extract last message text: {e}")
+            return None
+
+    def check_active_chat_for_new_messages(self, contact_name):
+        """Checks the currently open chat for new messages and replies if found."""
+        last_message_text = self.get_last_message_text()
+        
+        if not last_message_text:
+            return False
+            
+        # We also need to keep track of the absolute last message processed during this active loop 
+        # to prevent double-replying to the exact same message text if the DOM reloads.
+        msg_id = f"{contact_name}::{last_message_text}"
+        
+        # Check for duplicates or already handled messages
+        if msg_id in self.replied_messages:
+            return False
+            
+        # Check against an instance variable tracking the last actively processed message
+        if getattr(self, "last_active_message", None) == msg_id:
+             return False
+
+        logger.info(f"Processing new message from '{contact_name}': {last_message_text}")
+        
+        # Lock in this message as the currently processing one
+        self.last_active_message = msg_id
+        
+        # Simulate human delay before sending response
+        random_delay()
+        
+        # Ask Gemini for a reply
+        reply_text = generate_reply(last_message_text, contact_name=contact_name)
+        
+        # Type and send
+        self.send_message(reply_text)
+        
+        # Mark it as replied to avoid ghost replays
+        self.replied_messages.add(msg_id)
+        logger.info(f"Successfully sent AI reply to '{contact_name}'.")
+        return True
+
+    def process_chat(self, chat_element=None, already_open=False):
+        """Opens a chat (if not already open) and continuously monitors it for new messages."""
+        contact_name = "Unknown"
+        try:
+            if not already_open and chat_element:
+                # Use Javascript click as fallback if normal click is intercepted
+                try:
+                    chat_element.click()
+                except Exception:
+                    self.driver.execute_script("arguments[0].click();", chat_element)
+                    
+            # Wait dynamically instead of fixed sleep
+            header = WebDriverWait(self.driver, 10).until(
+                EC.presence_of_element_located((By.XPATH, '//header'))
+            )
+            time.sleep(1) # Small buffer for DOM to settle
+            
+            try:
+                contact_name = header.find_element(By.XPATH, './/span[@dir="auto"]').text
+            except NoSuchElementException:
+                # Fallback to the text of the header or a general span
+                try:
+                    contact_name = header.find_element(By.XPATH, './/span[contains(@class, "ggj6brxn")]').text
+                except:
+                    contact_name = header.text.split('\n')[0] if header.text else "Unknown"
+            
+            # Check if it's a group, channel, or community
+            if self.should_ignore_chat():
+                logger.info(f"Chat '{contact_name}' detected as a GROUP/CHANNEL/COMMUNITY. Skipping AI reply.")
+                return
+
+            logger.info(f"Actively monitoring chat with '{contact_name}'...")
+            
+            # Check immediately upon opening
+            self.check_active_chat_for_new_messages(contact_name)
+            
+            # Monitor the active chat for a short duration to reply to follow-ups
+            # We don't want to get stuck here forever if other chats have unread messages
+            monitor_duration = 30 # seconds to monitor active chat
+            start_time = time.time()
+            
+            while time.time() - start_time < monitor_duration:
+                # Small delay to prevent CPU spinning
+                time.sleep(2)
+                
+                # Check for new messages in the currently open chat
+                if self.check_active_chat_for_new_messages(contact_name):
+                    # If we found and replied to a new message, reset the monitor timer
+                    start_time = time.time()
+                    
+                # Break early if we see an unread badge from someone else in the chat list
+                try:
+                    unread_badges = self.driver.find_elements(
+                        By.XPATH, 
+                        '//span[@aria-label and contains(@aria-label, "unread message")]'
+                    )
+                    if unread_badges:
+                        logger.info("Found new unread messages in other chats. Exiting active monitor.")
+                        break
+                except StaleElementReferenceException:
+                    pass
+            
+            logger.info(f"Finished active monitoring for '{contact_name}'. Returning to main scan.")
+            
+        except StaleElementReferenceException:
+            logger.warning(f"DOM updated unexpectedly while processing chat. Will check again on next scan.")
+        except Exception as e:
+            logger.error(f"Error processing chat '{contact_name}': {e}")
+
+    def send_message(self, text):
+        """Finds the chat composer box and inputs the multi-line text message to send."""
+        try:
+            import pyperclip
+            
+            # We locate the text input box footer
+            message_box_xpath = '//footer//div[@contenteditable="true"]'
+            
+            message_box = WebDriverWait(self.driver, 10).until(
+                EC.presence_of_element_located((By.XPATH, message_box_xpath))
+            )
+            
+            # WhatsApp Web sometimes treats a pasted block with newlines as an immediate Send trigger
+            # or truncates it. Natively, we want to type out newlines using SHIFT+ENTER.
+            # However, ChromeDriver cannot type emojis (BMP only).
+            # Solution: Copy-paste each line one by one, adding SHIFT+ENTER between them.
+            lines = text.split('\n')
+            for i, line in enumerate(lines):
+                if line:
+                    # Windows clipboard is asynchronous and slow. We must verify it copied
+                    # before telling Chrome to paste, otherwise it pastes the old buffer.
+                    pyperclip.copy(line)
+                    
+                    # Wait up to 1 second for clipboard to actually grab the text
+                    attempts = 0
+                    while pyperclip.paste() != line and attempts < 10:
+                        time.sleep(0.1)
+                        attempts += 1
+                        
+                    # Use keyboard shortcuts to paste the text based on the OS.
+                    message_box.send_keys(Keys.CONTROL, 'v')
+                    time.sleep(0.3) # Wait longer for React to process paste
+                    
+                # Add newline if it's not the last line
+                if i < len(lines) - 1:
+                    message_box.send_keys(Keys.SHIFT, Keys.ENTER)
+            
+            time.sleep(1) # Allow React to process the full message box
+            
+            # Hard enter sends the message
+            message_box.send_keys(Keys.ENTER)
+            time.sleep(1) # Extra buffer for WhatsApp to register sent msg
+            
+        except Exception as e:
+            logger.error(f"Failed to send the final message back: {e}")
+
+    def quit(self):
+        """Cleanup and close the browser session explicitly."""
+        if self.driver:
+            self.driver.quit()
+            logger.info("Chrome WebDriver closed.")

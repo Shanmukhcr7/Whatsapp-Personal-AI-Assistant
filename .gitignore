@@ -1,0 +1,13 @@
+# Environments
+.env
+
+# Python
+__pycache__/
+*.pyc
+
+# Project Specific
+chrome_profile/
+bot.log
+
+# WebDriver Manager
+.wdm/
