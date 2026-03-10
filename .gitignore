@@ -6,7 +6,6 @@ __pycache__/
 *.pyc
 
 # Project Specific
-chrome_profile/
 bot.log
 
 # WebDriver Manager
