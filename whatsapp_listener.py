@@ -151,35 +151,66 @@ class WhatsAppBot:
     def should_ignore_chat(self):
         """
         Detects if the active chat is a group, channel, or community.
-        Bot is designed to NOT reply in these chats.
+        Uses multiple independent detection methods for reliability.
+        Returns True if the chat should be IGNORED (group/channel/community).
         """
         try:
             header = self.driver.find_element(By.XPATH, '//header')
-            
-            # 1. Look for specific icons
+            header_text = header.text.lower()
+
+            # METHOD 1: Look for group/community/channel SVG icon data attributes
+            icon_patterns = ['default-group', 'default-community', 'channel', 'group', 'community', 'newsletter']
             try:
-                header.find_element(By.XPATH, './/*[local-name()="svg" and (contains(@data-icon, "default-group") or contains(@data-icon, "default-community") or contains(@data-icon, "channel"))]')
+                svgs = header.find_elements(By.XPATH, './/*[local-name()="svg"]')
+                for svg in svgs:
+                    icon_val = svg.get_attribute('data-icon') or ''
+                    if any(p in icon_val.lower() for p in icon_patterns):
+                        logger.info(f"Group detected via SVG icon: '{icon_val}'. Skipping.")
+                        return True
+            except Exception:
+                pass
+
+            # METHOD 2: Check subtitle for "X members" - the definitive group indicator
+            subtitle_xpaths = ['.//div[@title]', './/span[@dir="auto"]']
+            for xpath in subtitle_xpaths:
+                try:
+                    elements = header.find_elements(By.XPATH, xpath)
+                    for el in elements:
+                        text = (el.get_attribute("title") or el.text or "").lower()
+                        if 'member' in text:
+                            logger.info(f"Group detected via 'members' in subtitle: '{text}'. Skipping.")
+                            return True
+                        # Group subtitle lists participants starting with "You, "
+                        if text.startswith('you, '):
+                            logger.info(f"Group detected via participant list: '{text[:60]}'. Skipping.")
+                            return True
+                        if any(kw in text for kw in ['channel', 'community', 'newsletter', 'broadcast']):
+                            logger.info(f"Group/Channel detected via keyword: '{text[:60]}'. Skipping.")
+                            return True
+                except Exception:
+                    pass
+
+            # METHOD 3: Full header text for definitive group-only phrases
+            if any(kw in header_text for kw in ['members', 'broadcast list', 'newsletter']):
+                logger.info(f"Group detected via header text keywords. Skipping.")
                 return True
-            except NoSuchElementException:
-                pass
-                
-            # 2. Look for multiple participants (comma separated in title/subtitle) 
-            # or the words 'group', 'channel', 'community'
+
+            # METHOD 4: Comma in the contact name span (group member list)
             try:
-                subtitle = header.find_element(By.XPATH, './/div[@title]')
-                title_text = subtitle.get_attribute("title").lower()
-                ignore_keywords = ['group', 'channel', 'community']
-                if ',' in title_text or any(keyword in title_text for keyword in ignore_keywords):
+                name_spans = header.find_elements(By.XPATH, './/span[@dir="auto"]')
+                if name_spans and ',' in name_spans[0].text:
+                    logger.info(f"Group detected via comma in name: '{name_spans[0].text[:60]}'. Skipping.")
                     return True
-            except NoSuchElementException:
+            except Exception:
                 pass
-                
+
             return False
-            
+
         except Exception as e:
-            # If unsure, we assume it's NOT a group, but we log it
-            logger.warning(f"Could not conclusively verify if chat is a group/channel/community. Proceeding as 1-on-1. Error: {e}")
-            return False
+            # Default to True (skip) on error to prevent accidental group replies
+            logger.warning(f"Group check failed, defaulting to SKIP for safety. Error: {e}")
+            return True
+
 
     def get_last_message_text(self):
         """Helper to get the text of the last incoming message in the active chat."""
