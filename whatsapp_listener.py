@@ -120,18 +120,26 @@ class WhatsAppBot:
                 return False
 
             if current_count > last_count:
+                # IMPORTANT: Before we trigger a reply, make sure this open chat isn't a group!
+                # If the user manually left a group chat open, the passive scanner will detect new 
+                # messages arriving in it. We must NOT reply to them.
+                if self.should_ignore_chat():
+                    logger.info(f"Passive check: New messages in open chat '{contact_name}', but it's a GROUP. Skipping.")
+                    # Update count so we don't keep analyzing the same new messages
+                    self.last_message_count[contact_name] = current_count
+                    return False
+                    
                 logger.info(
                     f"Passive check: {current_count - last_count} new message(s) detected in "
-                    f"open chat with '{contact_name}' (was {last_count}, now {current_count})."
+                    f"open 1-on-1 chat with '{contact_name}' (was {last_count}, now {current_count})."
                 )
-                # Re-enter the active monitor loop — it will handle group filtering internally
+                # Re-enter the active monitor loop
                 self.process_chat(None, already_open=True)
                 return True
 
         except Exception as e:
             logger.warning(f"Passive open chat check failed: {e}")
         return False
-
 
     def check_for_unread_messages(self):
         """Checks the chat list for unread messages."""
