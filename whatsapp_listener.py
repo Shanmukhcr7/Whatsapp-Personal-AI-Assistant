@@ -192,7 +192,7 @@ class WhatsAppBot:
                 except:
                     pass
                 
-                if contact_name and any(group.lower() == contact_name.lower() for group in IGNORED_GROUPS):
+                if contact_name and any(group.lower() in contact_name.lower() for group in IGNORED_GROUPS):
                     logger.info(f"Chat '{contact_name}' matched IGNORED_GROUPS list. Skipping.")
                     return True
 

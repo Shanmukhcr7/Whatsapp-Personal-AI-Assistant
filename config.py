@@ -19,12 +19,23 @@ REPLY_DELAY_MIN = 10  # seconds
 REPLY_DELAY_MAX = 25  # seconds
 
 # ─────────────────────────────────────────────────────────────────
-# IGNORED GROUPS — add exact WhatsApp group/chat names here.
-# The bot will NEVER reply in any chat whose name matches one of
+# IGNORED GROUPS — add exact or partial WhatsApp group names here.
+# The bot will NEVER reply in any chat whose name CONTAINS one of
 # these strings (case-insensitive). Add as many as you like.
 # ─────────────────────────────────────────────────────────────────
 IGNORED_GROUPS = [
-    # "VSIT MECH C",
-    # "Family Group",
-    # "College Friends",
+    # Full Names
+    "AI & AIML 2027 placements group",
+    "AI-2027",
+    "AI-B students(2023-27)",
+    "cryptography III-II,AI-B",
+    "IgniteXT X GITHUB",
+    "AI & AIML Men Annual Sports",
+    "TBCS(AI-A&B) 3rd yr",
+    
+    # Catch-all partials based on the user's groups
+    "AI & AIML",
+    "AI-B",
+    "AI-A",
+    "placements group",
 ]
