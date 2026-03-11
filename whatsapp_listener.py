@@ -209,17 +209,38 @@ class WhatsAppBot:
             except Exception:
                 pass
 
-            # 3. ── FALLBACK: Header text scan for empty groups (no messages loaded) ──
+            # 3. ── FALLBACK: Header Subtitle and Text scan (for empty groups) ──
             if header:
+                # Check 3A: Title attributes on the header text spans (WhatsApp specific)
+                # Group headers often have title="click here for group info"
+                try:
+                    title_spans = header.find_elements(By.XPATH, './/span[@title] | .//div[@title]')
+                    for el in title_spans:
+                        title_text = (el.get_attribute("title") or "").lower()
+                        if "group info" in title_text or "channel info" in title_text or "community info" in title_text:
+                            logger.info(f"Group detected via header title attribute: '{title_text}'. Skipping.")
+                            return True
+                except:
+                    pass
+
+                # Check 3B: Explicit subtitle scan for "member(s)"
+                try:
+                    # WhatsApp typically puts "members" or "You, ..." in a span with dir="auto" below the contact name
+                    subtitle_spans = header.find_elements(By.XPATH, './/span[@dir="auto"]')
+                    for span in subtitle_spans:
+                        text = span.text.lower().strip()
+                        # "3 members", "you, ravi, ...", "124 subscribers"
+                        if "member" in text or "subscriber" in text or text.startswith("you,"):
+                            logger.info(f"Group detected via subtitle element: '{text}'. Skipping.")
+                            return True
+                except:
+                    pass
+
+                # Check 3C: General raw text fallback
                 header_text = header.text.lower()
-                if any(kw in header_text for kw in ['member', 'broadcast list', 'newsletter', 'community']):
-                    logger.info("Group detected via header text. Skipping.")
+                if any(kw in header_text for kw in ['member', 'broadcast list', 'newsletter', 'community', 'channel']):
+                    logger.info("Group detected via header text keyword check. Skipping.")
                     return True
-                for el in header.find_elements(By.XPATH, './/span[@dir="auto"] | .//div[@title]'):
-                    text = (el.get_attribute("title") or el.text or "").lower()
-                    if text.startswith('you, ') or 'member' in text:
-                        logger.info(f"Group detected via header span: '{text[:60]}'. Skipping.")
-                        return True
 
             logger.info("Group check passed — treating as 1-on-1 chat.")
             return False
