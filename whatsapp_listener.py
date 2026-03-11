@@ -202,8 +202,12 @@ class WhatsAppBot:
             # - Group/Channel: First option is "Group info" or "Channel info".
             # - 1-on-1 chat: First option is ALWAYS "Contact info".
             try:
-                # Find the 3-dot menu button in the chat header (it has data-icon="menu")
-                menu_btn = header.find_element(By.XPATH, './/span[@data-icon="menu"]/ancestor::div[@role="button"]')
+                # Find all buttons in the chat header. The 3-dot menu is ALWAYS the last button on the right.
+                header_buttons = header.find_elements(By.XPATH, './/div[@role="button"]')
+                if not header_buttons:
+                    raise Exception("No buttons found in header")
+                
+                menu_btn = header_buttons[-1]
                 menu_btn.click()
                 
                 # Wait briefly for the dropdown to open
