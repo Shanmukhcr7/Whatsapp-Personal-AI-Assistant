@@ -153,50 +153,28 @@ class WhatsAppBot:
         Detects if the active chat is a group, channel, or community.
         Returns True if the chat should be IGNORED.
 
-        PRIMARY METHOD: Sender name in message bubbles.
-          In WhatsApp Web, group messages always show the sender's name as a labeled
-          span ABOVE the message bubble. 1-on-1 messages NEVER show this label.
-          This is the most reliable structural difference — it cannot be spoofed by
-          UI changes to the header.
+        PRIMARY: span[@data-testid='author'] inside message-in bubbles.
+          WhatsApp ONLY renders this sender-name label in group chats.
+          In 1-on-1 chats, this element is never present.
 
-        FALLBACK: Header text scan (for empty groups with no messages loaded).
+        FALLBACK: Header text scan for empty groups (no messages loaded yet).
         """
         try:
-            # ── PRIMARY CHECK: Sender name labels inside incoming message bubbles ──
-            # WhatsApp renders group sender names with data-testid="author" OR as a
-            # colored span directly inside the message-in bubble.
-            sender_name_selectors = [
-                '//div[contains(@class,"message-in")]//span[@data-testid="author"]',
-                '//div[contains(@class,"message-in")]//*[contains(@data-pre-plain-text,"")]//span[@dir="ltr"]',
-                '//div[contains(@class,"message-in")]//span[contains(@class,"_akbu")]',  # WhatsApp's author class
-            ]
-            for selector in sender_name_selectors:
-                try:
-                    authors = self.driver.find_elements(By.XPATH, selector)
-                    if authors:
-                        logger.info(f"Group detected via sender name in message bubble: '{authors[0].text}'. Skipping.")
-                        return True
-                except Exception:
-                    pass
-
-            # Also check data-pre-plain-text attribute on message wrappers.
-            # In groups, WhatsApp stores "[HH:MM, DD/MM/YYYY] SenderName:" in this attribute.
+            # ── PRIMARY CHECK: data-testid="author" inside incoming message bubbles ──
+            # This is the only WhatsApp-specific signal that is EXCLUSIVE to group chats.
+            # 1-on-1 chats: no author label ever appears in message bubbles.
+            # Group chats: every incoming message has a colored author name span.
             try:
-                pre_plain = self.driver.find_elements(
-                    By.XPATH, '//div[contains(@class,"message-in")]//*[@data-pre-plain-text]'
+                authors = self.driver.find_elements(
+                    By.XPATH, '//div[contains(@class,"message-in")]//span[@data-testid="author"]'
                 )
-                for el in pre_plain:
-                    pre_text = el.get_attribute("data-pre-plain-text") or ""
-                    # Format is "] SenderName:" — if SenderName ≠ contact, it's a group
-                    # We just need to confirm this attribute exists with a name part
-                    parts = pre_text.split("] ")
-                    if len(parts) >= 2 and parts[1].strip():
-                        logger.info(f"Group detected via data-pre-plain-text: '{pre_text[:60]}'. Skipping.")
-                        return True
+                if authors:
+                    logger.info(f"Group detected via author label in bubble: '{authors[0].text}'. Skipping.")
+                    return True
             except Exception:
                 pass
 
-            # ── FALLBACK: Header text scan (needed for empty groups / channels) ──
+            # ── FALLBACK: Header text scan for empty groups / channels ──
             try:
                 header = None
                 for selector in ['//div[@id="main"]//header', '//div[@data-testid="conversation-header"]']:
@@ -210,15 +188,14 @@ class WhatsAppBot:
 
                 if header:
                     header_text = header.text.lower()
-                    logger.info(f"Group fallback check — header text: '{header_text[:120]}'")
+                    logger.info(f"Group fallback check — header: '{header_text[:120]}'")
                     if any(kw in header_text for kw in ['member', 'broadcast list', 'newsletter', 'community']):
-                        logger.info("Group detected via header text fallback. Skipping.")
+                        logger.info("Group detected via header text. Skipping.")
                         return True
-                    # Participant list starting with "You, " in any header span
-                    for span in header.find_elements(By.XPATH, './/span[@dir="auto"] | .//div[@title]'):
-                        text = (span.get_attribute("title") or span.text or "").lower()
+                    for el in header.find_elements(By.XPATH, './/span[@dir="auto"] | .//div[@title]'):
+                        text = (el.get_attribute("title") or el.text or "").lower()
                         if text.startswith('you, ') or 'member' in text:
-                            logger.info(f"Group detected via header span fallback: '{text[:60]}'. Skipping.")
+                            logger.info(f"Group detected via header span: '{text[:60]}'. Skipping.")
                             return True
             except Exception:
                 pass
@@ -227,7 +204,7 @@ class WhatsAppBot:
             return False
 
         except Exception as e:
-            logger.warning(f"Group check failed with exception, defaulting to SKIP for safety. Error: {e}")
+            logger.warning(f"Group check failed, defaulting to SKIP for safety. Error: {e}")
             return True
 
 
