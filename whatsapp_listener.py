@@ -323,6 +323,7 @@ class WhatsAppBot:
         
         # FINAL FAILSAFE DOUBLE-CHECK: Right before we ask AI or type anything,
         # confirm one last time that this chat explicitly shows "Contact info".
+        logger.info(f"Final safety check: Verifying explicit 'Contact info' tag for {contact_name} before generating reply...")
         if self.should_ignore_chat():
             logger.warning(f"Final safety check failed! Chat '{contact_name}' is a group/channel. Aborting reply.")
             return False
