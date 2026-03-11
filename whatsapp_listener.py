@@ -176,25 +176,28 @@ class WhatsAppBot:
         Returns True if the chat should be IGNORED.
         """
         try:
-            # 1. ── Check against predefined IGNORED_GROUPS list first ──
+            # 0. ── Wait for header to render ──
+            # Sometimes the chat panel takes a second to load after clicking the chat list
             header = None
-            for selector in ['//div[@id="main"]//header', '//div[@data-testid="conversation-header"]']:
-                elems = self.driver.find_elements(By.XPATH, selector)
-                if elems:
-                    header = elems[0]
-                    break
+            try:
+                header = WebDriverWait(self.driver, 3).until(
+                    EC.presence_of_element_located((By.XPATH, '//div[@id="main"]//header'))
+                )
+            except TimeoutException:
+                logger.warning("Could not find chat header. Defaulting to SKIP for safety.")
+                return True
+
+            # 1. ── Check against predefined IGNORED_GROUPS list first ──
+            contact_name = ""
+            try:
+                name_elem = header.find_element(By.XPATH, './/span[@dir="auto"]')
+                contact_name = name_elem.text.strip()
+            except:
+                pass
             
-            if header:
-                contact_name = ""
-                try:
-                    name_elem = header.find_element(By.XPATH, './/span[@dir="auto"]')
-                    contact_name = name_elem.text.strip()
-                except:
-                    pass
-                
-                if contact_name and any(group.lower() in contact_name.lower() for group in IGNORED_GROUPS):
-                    logger.info(f"Chat '{contact_name}' matched IGNORED_GROUPS list. Skipping.")
-                    return True
+            if contact_name and any(group.lower() in contact_name.lower() for group in IGNORED_GROUPS):
+                logger.info(f"Chat '{contact_name}' matched IGNORED_GROUPS list. Skipping.")
+                return True
 
             # 2. ── PRIMARY: The 3-Dot Menu "Info" Check (100% Reliable) ──
             # The most foolproof way to know if a chat is 1-on-1 or a Group:
@@ -205,13 +208,14 @@ class WhatsAppBot:
                 # Find all buttons in the chat header. The 3-dot menu is ALWAYS the last button on the right.
                 header_buttons = header.find_elements(By.XPATH, './/div[@role="button"]')
                 if not header_buttons:
-                    raise Exception("No buttons found in header")
+                    logger.warning("No buttons found in header. Skipping for safety.")
+                    return True
                 
                 menu_btn = header_buttons[-1]
                 menu_btn.click()
                 
                 # Wait briefly for the dropdown to open
-                time.sleep(0.3)
+                time.sleep(0.5)
                 
                 # The dropdown menu is appended to the body, usually in an ul/li structure
                 # We look for the first menu item (it's always the info button)
@@ -226,6 +230,9 @@ class WhatsAppBot:
                         is_group = False  # Definitely a 1-on-1 chat
                     else:
                         is_group = True   # "Group info", "Channel info", etc.
+                else:
+                    logger.warning("Dropdown menu items not found. Skipping for safety.")
+                    return True
                 
                 # Close the menu by clicking the body or the menu button again
                 try:
@@ -242,14 +249,12 @@ class WhatsAppBot:
                     return False
                     
             except Exception as e:
-                logger.warning(f"Failed to use 3-dot menu, error: {e}")
-                pass
-
-            logger.info("Group check passed (fell through) — treating as 1-on-1 chat by default.")
-            return False
+                # If the menu click logic fails for any reason, DO NOT ASSUME 1-ON-1!
+                logger.warning(f"Failed to use 3-dot menu, error: {e}. Defaulting to SKIP.")
+                return True
 
         except Exception as e:
-            logger.warning(f"Group check failed, defaulting to SKIP for safety. Error: {e}")
+            logger.warning(f"Group check failed fatally, defaulting to SKIP. Error: {e}")
             return True
 
 
