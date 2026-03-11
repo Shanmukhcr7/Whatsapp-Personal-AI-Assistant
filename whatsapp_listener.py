@@ -321,6 +321,12 @@ class WhatsAppBot:
         # Simulate human delay before sending response
         random_delay()
         
+        # FINAL FAILSAFE DOUBLE-CHECK: Right before we ask AI or type anything,
+        # confirm one last time that this chat explicitly shows "Contact info".
+        if self.should_ignore_chat():
+            logger.warning(f"Final safety check failed! Chat '{contact_name}' is a group/channel. Aborting reply.")
+            return False
+        
         # Ask AI for a reply
         reply_text = generate_reply(last_message_text, contact_name=contact_name)
         
