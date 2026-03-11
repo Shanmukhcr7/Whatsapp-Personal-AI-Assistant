@@ -70,46 +70,68 @@ class WhatsAppBot:
 
     def check_current_open_chat_passive(self):
         """
-        Passively checks the currently open chat window (if any) for new messages 
-        using a MESSAGE COUNT approach — immune to the text-dedup false-negative bug.
-        If the number of incoming messages in the open chat has INCREASED since we
-        last replied, there must be a new message we haven't handled yet.
+        Passively checks the currently open chat window (if any) for new messages
+        using a MESSAGE COUNT approach.
+
+        If message count in current open chat increased since we last replied,
+        there is a new unread message that needs a reply.
         """
         try:
-            # Check if there's an active chat header visible
-            header = self.driver.find_elements(By.XPATH, '//header')
+            # Get the CHAT panel header (inside #main), NOT the sidebar header.
+            # Using //header[0] is wrong — that's the sidebar/search bar.
+            header = None
+            for selector in ['//div[@id="main"]//header', '//div[@data-testid="conversation-header"]']:
+                elems = self.driver.find_elements(By.XPATH, selector)
+                if elems:
+                    header = elems[0]
+                    break
+
             if not header:
+                # No chat is open right now
                 return False
-                
-            header_element = header[0]
-            try:
-                contact_name = header_element.find_element(By.XPATH, './/span[@dir="auto"]').text
-            except NoSuchElementException:
+
+            # Extract the contact name from the chat header
+            contact_name = None
+            for xpath in ['.//span[@dir="auto"]', './/span[@title]']:
                 try:
-                    contact_name = header_element.find_element(By.XPATH, './/span[contains(@class, "ggj6brxn")]').text
-                except:
-                    return False
+                    spans = header.find_elements(By.XPATH, xpath)
+                    for span in spans:
+                        name = (span.get_attribute("title") or span.text or "").strip()
+                        if name:
+                            contact_name = name
+                            break
+                except Exception:
+                    pass
+                if contact_name:
+                    break
 
-            if not contact_name or not contact_name.strip():
-                return False
-                    
-            if self.should_ignore_chat():
+            if not contact_name:
                 return False
 
-            # Count how many incoming messages are visible right now
+            # Count incoming messages currently visible in the open chat
             current_count = self.get_incoming_message_count()
-            last_count = self.last_message_count.get(contact_name, 0)
+            last_count = self.last_message_count.get(contact_name, -1)
+
+            # -1 means this chat was never processed by us in this session.
+            # We initialize the count WITHOUT triggering a reply so we don't
+            # send duplicate replies to old messages on startup.
+            if last_count == -1:
+                self.last_message_count[contact_name] = current_count
+                return False
 
             if current_count > last_count:
-                # New message(s) have appeared since we last handled this chat!
-                logger.info(f"Passive check: {current_count - last_count} new message(s) in open chat with '{contact_name}' (was {last_count}, now {current_count}).")
-                # Re-enter the active monitor loop to process and reply
+                logger.info(
+                    f"Passive check: {current_count - last_count} new message(s) detected in "
+                    f"open chat with '{contact_name}' (was {last_count}, now {current_count})."
+                )
+                # Re-enter the active monitor loop — it will handle group filtering internally
                 self.process_chat(None, already_open=True)
                 return True
-                
+
         except Exception as e:
             logger.warning(f"Passive open chat check failed: {e}")
         return False
+
 
     def check_for_unread_messages(self):
         """Checks the chat list for unread messages."""
