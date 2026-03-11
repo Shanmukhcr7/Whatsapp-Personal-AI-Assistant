@@ -199,65 +199,55 @@ class WhatsAppBot:
                 logger.info(f"Chat '{contact_name}' matched IGNORED_GROUPS list. Skipping.")
                 return True
 
-            # 2. ── PRIMARY: The 3-Dot Menu "Info" Check (100% Reliable) ──
-            # The most foolproof way to know if a chat is 1-on-1 or a Group:
-            # Click the 3-dot menu in the header.
-            # - Group/Channel: First option is "Group info" or "Channel info".
-            # - 1-on-1 chat: First option is ALWAYS "Contact info".
+            # 2. ── PRIMARY: HTML DOM Scan for "Group info" vs "Contact info" ──
+            # WhatsApp naturally encodes the chat type in the header's HTML title attributes.
+            # Instead of clicking menus (which is slow/fragile), we silently read the HTML.
+            
+            # The main profile button in the header has a title attribute:
+            # - 1-on-1 chats usually have title="Profile details" or "Contact info"
+            # - Group chats have title="Group info"
             try:
-                # Find all buttons in the chat header. The 3-dot menu is ALWAYS the last button on the right.
-                header_buttons = header.find_elements(By.XPATH, './/div[@role="button"]')
-                if not header_buttons:
-                    logger.warning("No buttons found in header. Skipping for safety.")
-                    return True
+                # Find all elements in the header that have a 'title' or 'aria-label' attribute
+                info_elements = header.find_elements(By.XPATH, './/*[@title] | .//*[@aria-label]')
                 
-                menu_btn = header_buttons[-1]
-                menu_btn.click()
-                
-                # Wait briefly for the dropdown to open
-                time.sleep(0.5)
-                
-                # The dropdown menu is appended to the body, usually in an ul/li structure
-                # We look for the first menu item (it's always the info button)
-                menu_items = self.driver.find_elements(By.XPATH, '//ul/li/div[@role="button"]')
-                
-                is_group = False
-                if menu_items:
-                    first_item_text = menu_items[0].text.lower().strip()
-                    logger.info(f"Group check — 3-dot menu first item is: '{first_item_text}'")
+                for el in info_elements:
+                    text_attr = (el.get_attribute("title") or el.get_attribute("aria-label") or "").lower()
                     
-                    if "contact info" in first_item_text:
-                        is_group = False  # Definitely a 1-on-1 chat
-                    else:
-                        is_group = True   # "Group info", "Channel info", etc.
-                else:
-                    logger.warning("Dropdown menu items not found. Skipping for safety.")
-                    return True
-                
-                # Close the menu by clicking the body or the menu button again
-                try:
-                    # Press escape to close the menu cleanly
-                    webdriver.ActionChains(self.driver).send_keys(Keys.ESCAPE).perform()
-                except:
-                    pass
-                
-                if is_group:
-                    logger.info("Group detected via 3-dot menu ('Contact info' not found). Skipping.")
-                    return True
-                else:
-                    logger.info("1-on-1 chat confirmed via 3-dot menu ('Contact info').")
-                    return False
-                    
+                    # If we find "group info", "channel info", or "community info", it's 100% a group
+                    if any(kw in text_attr for kw in ["group info", "channel info", "community info"]):
+                        logger.info(f"Group detected via HTML attribute: '{text_attr}'. Skipping.")
+                        return True
             except Exception as e:
-                # If the menu click logic fails for any reason, DO NOT ASSUME 1-ON-1!
-                logger.warning(f"Failed to use 3-dot menu, error: {e}. Defaulting to SKIP.")
-                return True
+                pass
+
+            # 3. ── FALLBACK: "Sender Name" & "Members" HTML Scan ──
+            # Group chats uniquely have:
+            # A) Sender names inside message bubbles
+            # B) Subtitles saying "X members" or listing names "You, Ravi, Kiran"
+            try:
+                # A. Check for sender names in bubbles (1-on-1 never has this)
+                authors = self.driver.find_elements(By.XPATH, '//div[contains(@class,"message-in")]//span[@data-testid="author"]')
+                if authors:
+                    logger.info(f"Group detected via author label in HTML: '{authors[0].text}'. Skipping.")
+                    return True
+                
+                # B. Check for "member" or participant lists in the header HTML
+                subtitles = header.find_elements(By.XPATH, './/span[@dir="auto"]')
+                for span in subtitles:
+                    text = span.text.lower().strip()
+                    if "member" in text or "subscriber" in text or text.startswith("you,"):
+                        logger.info(f"Group detected via subtitle HTML: '{text}'. Skipping.")
+                        return True
+            except Exception:
+                pass
+
+            # If none of the group signals are found in the HTML, we assume it's a normal chat
+            logger.info("Group HTML scan passed (no group signatures found) — treating as 1-on-1 chat.")
+            return False
 
         except Exception as e:
             logger.warning(f"Group check failed fatally, defaulting to SKIP. Error: {e}")
             return True
-
-
     def get_last_message_text(self):
         """Helper to get the text of the last incoming message in the active chat."""
         try:
