@@ -196,53 +196,52 @@ class WhatsAppBot:
                     logger.info(f"Chat '{contact_name}' matched IGNORED_GROUPS list. Skipping.")
                     return True
 
-            # 2. ── PRIMARY: author label in message bubbles ──
-            # WhatsApp ONLY renders this sender-name label in group chats.
-            # In 1-on-1 chats, this element is never present.
+            # 2. ── PRIMARY: The 3-Dot Menu "Info" Check (100% Reliable) ──
+            # The most foolproof way to know if a chat is 1-on-1 or a Group:
+            # Click the 3-dot menu in the header.
+            # - Group/Channel: First option is "Group info" or "Channel info".
+            # - 1-on-1 chat: First option is ALWAYS "Contact info".
             try:
-                authors = self.driver.find_elements(
-                    By.XPATH, '//div[contains(@class,"message-in")]//span[@data-testid="author"]'
-                )
-                if authors:
-                    logger.info(f"Group detected via author label in bubble: '{authors[0].text}'. Skipping.")
+                # Find the 3-dot menu button in the chat header (it has data-icon="menu")
+                menu_btn = header.find_element(By.XPATH, './/span[@data-icon="menu"]/ancestor::div[@role="button"]')
+                menu_btn.click()
+                
+                # Wait briefly for the dropdown to open
+                time.sleep(0.3)
+                
+                # The dropdown menu is appended to the body, usually in an ul/li structure
+                # We look for the first menu item (it's always the info button)
+                menu_items = self.driver.find_elements(By.XPATH, '//ul/li/div[@role="button"]')
+                
+                is_group = False
+                if menu_items:
+                    first_item_text = menu_items[0].text.lower().strip()
+                    logger.info(f"Group check — 3-dot menu first item is: '{first_item_text}'")
+                    
+                    if "contact info" in first_item_text:
+                        is_group = False  # Definitely a 1-on-1 chat
+                    else:
+                        is_group = True   # "Group info", "Channel info", etc.
+                
+                # Close the menu by clicking the body or the menu button again
+                try:
+                    # Press escape to close the menu cleanly
+                    webdriver.ActionChains(self.driver).send_keys(Keys.ESCAPE).perform()
+                except:
+                    pass
+                
+                if is_group:
+                    logger.info("Group detected via 3-dot menu ('Contact info' not found). Skipping.")
                     return True
-            except Exception:
+                else:
+                    logger.info("1-on-1 chat confirmed via 3-dot menu ('Contact info').")
+                    return False
+                    
+            except Exception as e:
+                logger.warning(f"Failed to use 3-dot menu, error: {e}")
                 pass
 
-            # 3. ── FALLBACK: Header Subtitle and Text scan (for empty groups) ──
-            if header:
-                # Check 3A: Title attributes on the header text spans (WhatsApp specific)
-                # Group headers often have title="click here for group info"
-                try:
-                    title_spans = header.find_elements(By.XPATH, './/span[@title] | .//div[@title]')
-                    for el in title_spans:
-                        title_text = (el.get_attribute("title") or "").lower()
-                        if "group info" in title_text or "channel info" in title_text or "community info" in title_text:
-                            logger.info(f"Group detected via header title attribute: '{title_text}'. Skipping.")
-                            return True
-                except:
-                    pass
-
-                # Check 3B: Explicit subtitle scan for "member(s)"
-                try:
-                    # WhatsApp typically puts "members" or "You, ..." in a span with dir="auto" below the contact name
-                    subtitle_spans = header.find_elements(By.XPATH, './/span[@dir="auto"]')
-                    for span in subtitle_spans:
-                        text = span.text.lower().strip()
-                        # "3 members", "you, ravi, ...", "124 subscribers"
-                        if "member" in text or "subscriber" in text or text.startswith("you,"):
-                            logger.info(f"Group detected via subtitle element: '{text}'. Skipping.")
-                            return True
-                except:
-                    pass
-
-                # Check 3C: General raw text fallback
-                header_text = header.text.lower()
-                if any(kw in header_text for kw in ['member', 'broadcast list', 'newsletter', 'community', 'channel']):
-                    logger.info("Group detected via header text keyword check. Skipping.")
-                    return True
-
-            logger.info("Group check passed — treating as 1-on-1 chat.")
+            logger.info("Group check passed (fell through) — treating as 1-on-1 chat by default.")
             return False
 
         except Exception as e:
