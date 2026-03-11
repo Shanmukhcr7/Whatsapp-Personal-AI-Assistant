@@ -9,7 +9,7 @@ from selenium.common.exceptions import TimeoutException, NoSuchElementException,
 from webdriver_manager.chrome import ChromeDriverManager
 from selenium.webdriver.common.keys import Keys
 
-from config import WEB_WHATSAPP_URL
+from config import WEB_WHATSAPP_URL, IGNORED_GROUPS
 from ai_engine import generate_reply
 from utils import get_logger, random_delay
 
@@ -174,18 +174,31 @@ class WhatsAppBot:
         """
         Detects if the active chat is a group, channel, or community.
         Returns True if the chat should be IGNORED.
-
-        PRIMARY: span[@data-testid='author'] inside message-in bubbles.
-          WhatsApp ONLY renders this sender-name label in group chats.
-          In 1-on-1 chats, this element is never present.
-
-        FALLBACK: Header text scan for empty groups (no messages loaded yet).
         """
         try:
-            # ── PRIMARY CHECK: data-testid="author" inside incoming message bubbles ──
-            # This is the only WhatsApp-specific signal that is EXCLUSIVE to group chats.
-            # 1-on-1 chats: no author label ever appears in message bubbles.
-            # Group chats: every incoming message has a colored author name span.
+            # 1. ── Check against predefined IGNORED_GROUPS list first ──
+            header = None
+            for selector in ['//div[@id="main"]//header', '//div[@data-testid="conversation-header"]']:
+                elems = self.driver.find_elements(By.XPATH, selector)
+                if elems:
+                    header = elems[0]
+                    break
+            
+            if header:
+                contact_name = ""
+                try:
+                    name_elem = header.find_element(By.XPATH, './/span[@dir="auto"]')
+                    contact_name = name_elem.text.strip()
+                except:
+                    pass
+                
+                if contact_name and any(group.lower() == contact_name.lower() for group in IGNORED_GROUPS):
+                    logger.info(f"Chat '{contact_name}' matched IGNORED_GROUPS list. Skipping.")
+                    return True
+
+            # 2. ── PRIMARY: author label in message bubbles ──
+            # WhatsApp ONLY renders this sender-name label in group chats.
+            # In 1-on-1 chats, this element is never present.
             try:
                 authors = self.driver.find_elements(
                     By.XPATH, '//div[contains(@class,"message-in")]//span[@data-testid="author"]'
@@ -196,31 +209,17 @@ class WhatsAppBot:
             except Exception:
                 pass
 
-            # ── FALLBACK: Header text scan for empty groups / channels ──
-            try:
-                header = None
-                for selector in ['//div[@id="main"]//header', '//div[@data-testid="conversation-header"]']:
-                    elems = self.driver.find_elements(By.XPATH, selector)
-                    if elems:
-                        header = elems[0]
-                        break
-                if not header:
-                    all_headers = self.driver.find_elements(By.XPATH, '//header')
-                    header = all_headers[1] if len(all_headers) >= 2 else (all_headers[0] if all_headers else None)
-
-                if header:
-                    header_text = header.text.lower()
-                    logger.info(f"Group fallback check — header: '{header_text[:120]}'")
-                    if any(kw in header_text for kw in ['member', 'broadcast list', 'newsletter', 'community']):
-                        logger.info("Group detected via header text. Skipping.")
+            # 3. ── FALLBACK: Header text scan for empty groups (no messages loaded) ──
+            if header:
+                header_text = header.text.lower()
+                if any(kw in header_text for kw in ['member', 'broadcast list', 'newsletter', 'community']):
+                    logger.info("Group detected via header text. Skipping.")
+                    return True
+                for el in header.find_elements(By.XPATH, './/span[@dir="auto"] | .//div[@title]'):
+                    text = (el.get_attribute("title") or el.text or "").lower()
+                    if text.startswith('you, ') or 'member' in text:
+                        logger.info(f"Group detected via header span: '{text[:60]}'. Skipping.")
                         return True
-                    for el in header.find_elements(By.XPATH, './/span[@dir="auto"] | .//div[@title]'):
-                        text = (el.get_attribute("title") or el.text or "").lower()
-                        if text.startswith('you, ') or 'member' in text:
-                            logger.info(f"Group detected via header span: '{text[:60]}'. Skipping.")
-                            return True
-            except Exception:
-                pass
 
             logger.info("Group check passed — treating as 1-on-1 chat.")
             return False

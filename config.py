@@ -17,3 +17,14 @@ MESSAGE_SCAN_INTERVAL = 3
 # Minimum and Maximum delay before replying (Anti-spam safety)
 REPLY_DELAY_MIN = 10  # seconds
 REPLY_DELAY_MAX = 25  # seconds
+
+# ─────────────────────────────────────────────────────────────────
+# IGNORED GROUPS — add exact WhatsApp group/chat names here.
+# The bot will NEVER reply in any chat whose name matches one of
+# these strings (case-insensitive). Add as many as you like.
+# ─────────────────────────────────────────────────────────────────
+IGNORED_GROUPS = [
+    # "VSIT MECH C",
+    # "Family Group",
+    # "College Friends",
+]
