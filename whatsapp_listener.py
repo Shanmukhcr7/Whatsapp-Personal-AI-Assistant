@@ -207,13 +207,12 @@ class WhatsAppBot:
                 logger.info(f"Chat '{contact_name}' matched IGNORED_GROUPS list. Skipping.")
                 return True
 
-            # 2. ── PRIMARY: HTML DOM Scan for "Group info" vs "Contact info" ──
-            # WhatsApp naturally encodes the chat type in the header's HTML title attributes.
-            # Instead of clicking menus (which is slow/fragile), we silently read the HTML.
+            # 2. ── PRIMARY: HTML DOM Scan for Explicit 1-on-1 Signatures ──
+            # We must be 100% sure this is a 1-on-1 chat. 
+            # In WhatsApp Web, 1-on-1 chats have header elements with:
+            # title="Profile details" or title="Contact info"
+            is_definitely_one_on_one = False
             
-            # The main profile button in the header has a title attribute:
-            # - 1-on-1 chats usually have title="Profile details" or "Contact info"
-            # - Group chats have title="Group info"
             try:
                 # Find all elements in the header that have a 'title' or 'aria-label' attribute
                 info_elements = header.find_elements(By.XPATH, './/*[@title] | .//*[@aria-label]')
@@ -221,17 +220,21 @@ class WhatsAppBot:
                 for el in info_elements:
                     text_attr = (el.get_attribute("title") or el.get_attribute("aria-label") or "").lower()
                     
-                    # If we find "group info", "channel info", or "community info", it's 100% a group
-                    if any(kw in text_attr for kw in ["group info", "channel info", "community info"]):
-                        logger.info(f"Group detected via HTML attribute: '{text_attr}'. Skipping.")
+                    # If we explicitly find the 1-on-1 signature, we can safely approve it
+                    if "contact info" in text_attr or "profile details" in text_attr:
+                        logger.info(f"1-on-1 chat EXPLICITLY confirmed via HTML attribute: '{text_attr}'.")
+                        is_definitely_one_on_one = True
+                        break
+                    
+                    # If we explicitly see group signals, fail immediately
+                    if any(kw in text_attr for kw in ["group info", "channel info", "community info", "list info"]):
+                        logger.info(f"Group explicitly detected via HTML attribute: '{text_attr}'. Skipping.")
                         return True
             except Exception as e:
                 pass
 
             # 3. ── FALLBACK: "Sender Name" & "Members" HTML Scan ──
-            # Group chats uniquely have:
-            # A) Sender names inside message bubbles
-            # B) Subtitles saying "X members" or listing names "You, Ravi, Kiran"
+            # Even if we think it's 1-on-1, double check for hidden group signatures
             try:
                 # A. Check for sender names in bubbles (1-on-1 never has this)
                 authors = self.driver.find_elements(By.XPATH, '//div[contains(@class,"message-in")]//span[@data-testid="author"]')
@@ -249,9 +252,14 @@ class WhatsAppBot:
             except Exception:
                 pass
 
-            # If none of the group signals are found in the HTML, we assume it's a normal chat
-            logger.info("Group HTML scan passed (no group signatures found) — treating as 1-on-1 chat.")
-            return False
+            # ── FINAL VERDICT ──
+            if is_definitely_one_on_one:
+                return False
+            else:
+                # If we couldn't explicitly prove it's a 1-on-1 chat, we MUST skip it for safety.
+                # This prevents weird group types (like broadcasts/communities) from slipping through.
+                logger.warning("Could not explicitly confirm chat is 1-on-1 via HTML signatures. Defaulting to SKIP!")
+                return True
 
         except Exception as e:
             logger.warning(f"Group check failed fatally, defaulting to SKIP. Error: {e}")
