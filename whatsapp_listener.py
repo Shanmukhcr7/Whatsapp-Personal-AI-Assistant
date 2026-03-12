@@ -135,7 +135,11 @@ class WhatsAppBot:
                 )
                 # Re-enter the active monitor loop
                 self.process_chat(None, already_open=True)
-                return True
+                
+                # IMPORTANT: Return False so the main scan continues to check OTHER unread badges!
+                # If we return True here, the main loop instantly restarts and we get trapped 
+                # endlessly analyzing the open chat while ignoring everyone else.
+                return False
 
         except Exception as e:
             logger.warning(f"Passive open chat check failed: {e}")
@@ -326,7 +330,7 @@ class WhatsAppBot:
         logger.info(f"Final safety check: Verifying explicit 'Contact info' tag for {contact_name} before generating reply...")
         if self.should_ignore_chat():
             logger.warning(f"Final safety check failed! Chat '{contact_name}' is a group/channel. Aborting reply.")
-            return False
+            return "GROUP_ERROR"
         
         # Ask AI for a reply
         reply_text = generate_reply(last_message_text, contact_name=contact_name)
@@ -391,7 +395,12 @@ class WhatsAppBot:
                 time.sleep(2)
                 
                 # Check for new messages in the currently open chat
-                if self.check_active_chat_for_new_messages(contact_name):
+                status = self.check_active_chat_for_new_messages(contact_name)
+                
+                if status == "GROUP_ERROR":
+                    logger.info("Active chat failed safety checks. Exiting active monitor immediately.")
+                    break
+                elif status == True:
                     # If we found and replied to a new message, reset the monitor timer
                     start_time = time.time()
                     
